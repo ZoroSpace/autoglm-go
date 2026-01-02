@@ -1,15 +1,16 @@
 package llm
 
 import (
-	"autoglm-go/phoneagent/definitions"
-	"autoglm-go/phoneagent/helper"
-	"autoglm-go/utils"
 	"context"
 	"fmt"
-	"github.com/sashabaranov/go-openai"
 	"io"
 	"strings"
 	"time"
+
+	"autoglm-go/phoneagent/definitions"
+	"autoglm-go/phoneagent/helper"
+	"github.com/sashabaranov/go-openai"
+	logs "github.com/sirupsen/logrus"
 )
 
 type ModelClient struct {
@@ -49,7 +50,7 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 		timeToThinkingEnd *float64
 
 		rawContent         strings.Builder
-		buffer             strings.Builder
+		thinkingBuf        strings.Builder
 		inActionPhase      bool
 		firstTokenReceived bool
 	)
@@ -64,15 +65,9 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 		Stream:              true,
 	}
 
-	for _, data := range req.Messages[len(req.Messages)-1].MultiContent {
-		if data.Text != "" {
-			fmt.Printf("data: %s\n", utils.JsonString(data))
-		}
-	}
-
 	stream, err := c.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		fmt.Printf("CreateChatCompletionStream error: %v\n", err)
+		logs.Errorf("CreateChatCompletionStream error: %v", err)
 		return nil, err
 	}
 	defer stream.Close()
@@ -85,7 +80,7 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 			if err == io.EOF {
 				break
 			}
-			fmt.Printf("Stream error: %v\n", err)
+			logs.Errorf("Stream error: %v", err)
 			return nil, err
 		}
 
@@ -111,15 +106,16 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 			continue
 		}
 
-		buffer.WriteString(delta)
-		bufStr := buffer.String()
+		// for print thinking part
+		thinkingBuf.WriteString(delta)
+		thinkingBufStr := thinkingBuf.String()
 
 		markerFound := false
 		for _, marker := range actionMarkers {
-			if strings.Contains(bufStr, marker) {
-				thinkingPart := strings.SplitN(bufStr, marker, 2)[0]
+			if strings.Contains(thinkingBufStr, marker) {
+				// before marker is the thinking part
+				thinkingPart := strings.SplitN(thinkingBufStr, marker, 2)[0]
 				fmt.Print(thinkingPart)
-				fmt.Println()
 
 				inActionPhase = true
 				markerFound = true
@@ -136,12 +132,12 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 			continue
 		}
 
-		// Check if buffer ends with a prefix of any marker
+		// Check if thinkingBuf ends with a prefix of any marker
 		// If so, don't print yet (wait for more content)
 		isPotentialMarker := false
 		for _, marker := range actionMarkers {
 			for i := 1; i < len(marker); i++ {
-				if strings.HasSuffix(bufStr, marker[:i]) {
+				if strings.HasSuffix(thinkingBufStr, marker[:i]) {
 					isPotentialMarker = true
 					break
 				}
@@ -152,14 +148,15 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 		}
 
 		if !isPotentialMarker {
-			// Safe to print the buffer
-			fmt.Print(bufStr)
-			buffer.Reset()
+			// Safe to print the thinking part
+			fmt.Print(thinkingBufStr)
+			thinkingBuf.Reset()
 		}
 	}
 
 	totalTime := time.Since(startTime).Seconds()
 
+	// parse thinking and action from raw content
 	thinking, action := parseResponse(rawContent.String())
 
 	printMetrics(
@@ -178,6 +175,7 @@ func (c *ModelClient) Request(ctx context.Context, messages []openai.ChatComplet
 		TotalTime:         totalTime,
 	}, nil
 }
+
 func parseResponse(content string) (string, string) {
 	/*
 	   Parse the model response into thinking and action parts.
@@ -229,17 +227,17 @@ func parseResponse(content string) (string, string) {
 }
 
 func printMetrics(lang string, firstToken *float64, thinkingEnd *float64, total float64) {
-	fmt.Println()
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Println("⏱️  " + helper.GetMessage("performance_metrics", lang))
-	fmt.Println(strings.Repeat("-", 50))
+	logs.Info("")
+	logs.Info(strings.Repeat("=", 50))
+	logs.Info("⏱️  " + helper.GetMessage("performance_metrics", lang))
+	logs.Info(strings.Repeat("-", 50))
 
 	if firstToken != nil {
-		fmt.Printf("%s: %.3fs\n", helper.GetMessage("time_to_first_token", lang), *firstToken)
+		logs.Infof("%s: %.3fs", helper.GetMessage("time_to_first_token", lang), *firstToken)
 	}
 	if thinkingEnd != nil {
-		fmt.Printf("%s: %.3fs\n", helper.GetMessage("time_to_thinking_end", lang), *thinkingEnd)
+		logs.Infof("%s: %.3fs", helper.GetMessage("time_to_thinking_end", lang), *thinkingEnd)
 	}
-	fmt.Printf("%s: %.3fs\n", helper.GetMessage("total_inference_time", lang), total)
-	fmt.Println(strings.Repeat("=", 50))
+	logs.Infof("%s: %.3fs", helper.GetMessage("total_inference_time", lang), total)
+	logs.Info(strings.Repeat("=", 50))
 }

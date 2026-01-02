@@ -1,7 +1,6 @@
 package android
 
 import (
-	"autoglm-go/phoneagent/definitions"
 	"bufio"
 	"context"
 	"fmt"
@@ -9,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"autoglm-go/phoneagent/definitions"
+	logs "github.com/sirupsen/logrus"
 )
 
 const (
@@ -19,27 +21,31 @@ func (r *ADBDevice) Connect(ctx context.Context, address string) (string, error)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if !strings.Contains(address, ":") {
-		address = fmt.Sprintf("%s:5555", address) // Default ADB port
-	}
 	// Prepare the command
 	cmdArgs := []string{"connect", address}
-	fmt.Printf("[Connect] run cmd: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
+
+	logs.Debugf("[Connect] run cmd: %s %s", adbPath, strings.Join(cmdArgs, " "))
 
 	cmd := exec.CommandContext(ctx, adbPath, cmdArgs...)
-	rawOutput, err := cmd.Output()
+	rawOutput, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[Connect] run cmd failed, err: %v\n", err)
+		logs.Errorf("[Connect] run cmd failed, err: %v", err)
 		return fmt.Sprintf("Connect error: %v", err), err
 	}
+
+	logs.Debugf("[Connect] raw output: %s", rawOutput)
+
 	output := string(rawOutput)
 
 	lowerOutput := strings.ToLower(output)
-	if strings.Contains(lowerOutput, "connected") {
-		return fmt.Sprintf("Connected to %s", address), nil
-	} else if strings.Contains(lowerOutput, "already connected") {
+
+	if strings.Contains(lowerOutput, "already connected") {
 		return fmt.Sprintf("Already connected to %s", address), nil
 	}
+	if strings.Contains(lowerOutput, " connected") {
+		return fmt.Sprintf("Connected to %s", address), nil
+	}
+
 	return fmt.Sprintf("Connection error: %s", strings.TrimSpace(output)), nil
 }
 
@@ -52,14 +58,16 @@ func (r *ADBDevice) Disconnect(ctx context.Context, address string) (string, err
 	if len(address) > 0 {
 		cmdArgs = append(cmdArgs, address)
 	}
-	fmt.Printf("[Disconnect] run cmd: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
+	logs.Debugf("[Disconnect] run cmd: %s %s", adbPath, strings.Join(cmdArgs, " "))
 
 	cmd := exec.CommandContext(ctx, adbPath, cmdArgs...)
-	rawOutput, err := cmd.Output()
+	rawOutput, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[Disconnect] run cmd failed, err: %v\n", err)
+		logs.Errorf("[Disconnect] run cmd failed, err: %v", err)
 		return fmt.Sprintf("Disconnect error: %v", err), err
 	}
+
+	logs.Debugf("[Disconnect] raw output: %s", rawOutput)
 
 	return string(rawOutput), nil
 }
@@ -69,11 +77,12 @@ func (r *ADBDevice) ListDevices(ctx context.Context) ([]definitions.DeviceInfo, 
 	defer cancel()
 	cmdArgs := []string{"devices", "-l"}
 
-	fmt.Printf("[ListDevices] run cmd: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
+	logs.Debugf("[ListDevices] run cmd: %s %s", adbPath, strings.Join(cmdArgs, " "))
 	cmd := exec.CommandContext(ctx, adbPath, cmdArgs...)
-	rawOutput, err := cmd.Output()
+
+	rawOutput, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[ListDevices] run cmd failed, err: %v\n", err)
+		logs.Errorf("[ListDevices] run cmd failed, err: %v", err)
 		return nil, err
 	}
 	output := string(rawOutput)
@@ -149,12 +158,12 @@ func (r *ADBDevice) EnableTCPIP(ctx context.Context, port int, deviceID string) 
 	}
 	cmdArgs = append(cmdArgs, "tcpip", strconv.Itoa(port))
 
-	fmt.Printf("[EnableTCPIP] run cmd: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
+	logs.Debugf("[EnableTCPIP] run cmd: %s %s", adbPath, strings.Join(cmdArgs, " "))
 
 	cmd := exec.CommandContext(ctx, adbPath, cmdArgs...)
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[EnableTCPIP] run cmd failed, err: %v\n", err)
+		logs.Errorf("[EnableTCPIP] run cmd failed, err: %v", err)
 		return err
 	}
 
@@ -178,13 +187,16 @@ func (r *ADBDevice) GetDeviceIP(ctx context.Context, deviceID string) (string, e
 	cmdArgs = append(cmdArgs, "shell", "ip", "route")
 
 	cmd := exec.CommandContext(ctx, adbPath, cmdArgs...)
-	fmt.Printf("[GetDeviceIP] run cmd1: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
+	logs.Debugf("[GetDeviceIP] run cmd1: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[GetDeviceIP] run cmd1 failed, err: %v\n", err)
+		logs.Errorf("[GetDeviceIP] run cmd1 failed, err: %v\n", err)
 		return "", err
 	}
+
+	logs.Debugf("[GetDeviceIP] output1: %s\n", string(output))
+
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "src") {
@@ -204,14 +216,16 @@ func (r *ADBDevice) GetDeviceIP(ctx context.Context, deviceID string) (string, e
 		cmdArgs = append(cmdArgs, "-s", deviceID)
 	}
 	cmdArgs = append(cmdArgs, "shell", "ip", "addr", "show", "wlan0")
-	fmt.Printf("[GetDeviceIP] run cmd2: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
+	logs.Debugf("[GetDeviceIP] run cmd2: %s %s\n", adbPath, strings.Join(cmdArgs, " "))
 
 	cmd = exec.CommandContext(ctx, adbPath, cmdArgs...)
-	output, err = cmd.Output()
+	output, err = cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[GetDeviceIP] run cmd2 failed, err: %v\n", err)
+		logs.Errorf("[GetDeviceIP] run cmd2 failed, err: %v\n", err)
 		return "", err
 	}
+	logs.Debugf("[GetDeviceIP] output2: %s\n", string(output))
+
 	lines = strings.Split(string(output), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)

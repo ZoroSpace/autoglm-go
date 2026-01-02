@@ -1,13 +1,10 @@
 package android
 
 import (
-	"autoglm-go/constants"
-	"autoglm-go/phoneagent/definitions"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/google/uuid"
 	"image"
 	"image/png"
 	"os"
@@ -16,6 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"autoglm-go/constants"
+	"autoglm-go/phoneagent/definitions"
+	"github.com/google/uuid"
+	logs "github.com/sirupsen/logrus"
 )
 
 type ADBDevice struct {
@@ -28,14 +30,12 @@ func createFallbackScreenshot(isSensitive bool) *definitions.Screenshot {
 		defaultHeight = 2400
 	)
 
-	// 创建黑色 RGBA 图像
 	img := image.NewRGBA(image.Rect(0, 0, defaultWidth, defaultHeight))
 
-	// 直接编码 PNG 并转 Base64
 	var buf bytes.Buffer
 	encoder := base64.NewEncoder(base64.StdEncoding, &buf)
 	if err := png.Encode(encoder, img); err != nil {
-		fmt.Printf("Error encoding fallback image: %v\n", err)
+		logs.Errorf("Error encoding fallback image: %v", err)
 		return &definitions.Screenshot{
 			Base64Data:  "",
 			Width:       defaultWidth,
@@ -43,7 +43,7 @@ func createFallbackScreenshot(isSensitive bool) *definitions.Screenshot {
 			IsSensitive: isSensitive,
 		}
 	}
-	encoder.Close() // 确保 Base64 编码完整
+	encoder.Close()
 
 	return &definitions.Screenshot{
 		Base64Data:  buf.String(),
@@ -59,46 +59,51 @@ func (r *ADBDevice) GetScreenshot(ctx context.Context, deviceID string) (*defini
 		_ = os.Remove(tempPath) // 确保临时文件被清理
 	}()
 
-	// 设置 adb 参数
 	var cmdArgs []string
 	if len(deviceID) > 0 {
 		cmdArgs = append(cmdArgs, "-s", deviceID)
 	}
 
-	// 执行截屏
+	// 截屏
 	screenshotArgs := append(cmdArgs, "shell", "screencap", "-p", "/sdcard/tmp.png")
-	fmt.Printf("[GetScreenshot] run cmd1: %s %s\n", adbPath, strings.Join(screenshotArgs, " "))
+	logs.Debugf("[GetScreenshot] run cmd1: %s %s", adbPath, strings.Join(screenshotArgs, " "))
 
 	output, err := exec.CommandContext(ctx, adbPath, screenshotArgs...).CombinedOutput()
 	if err != nil {
-		fmt.Printf("Screenshot command error: %v, output: %s\n", err, output)
+		logs.Errorf("Screenshot command error: %v, output: %s", err, output)
 		return createFallbackScreenshot(false), nil
 	}
 
+	logs.Debugf("[GetScreenshot] cmd1 output: %s", output)
+
 	outputStr := string(output)
 	if strings.Contains(outputStr, "Status: -1") || strings.Contains(outputStr, "Failed") {
+		logs.Errorf("Screenshot failed with status: -1 or Failed, output: %s", outputStr)
 		return createFallbackScreenshot(true), nil
 	}
 
 	// 拉取文件
 	pullArgs := append(cmdArgs, "pull", "/sdcard/tmp.png", tempPath)
-	fmt.Printf("[GetScreenshot] run cmd2: %s %s\n", adbPath, strings.Join(pullArgs, " "))
+	logs.Debugf("[GetScreenshot] run cmd2: %s %s", adbPath, strings.Join(pullArgs, " "))
 
-	if out, err := exec.CommandContext(ctx, adbPath, pullArgs...).CombinedOutput(); err != nil {
-		fmt.Printf("Pull command error: %v, output: %s\n", err, out)
+	output, err = exec.CommandContext(ctx, adbPath, pullArgs...).CombinedOutput()
+	if err != nil {
+		logs.Errorf("Pull command error: %v, output: %s", err, output)
 		return createFallbackScreenshot(false), nil
 	}
+
+	logs.Debugf("[GetScreenshot] cmd2 output: %s", output)
 
 	// 读取文件并 Base64 编码
 	data, err := os.ReadFile(tempPath)
 	if err != nil {
-		fmt.Printf("Error reading image file: %v\n", err)
+		logs.Errorf("Error reading image file: %v", err)
 		return createFallbackScreenshot(false), nil
 	}
 
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		fmt.Printf("Error decoding image: %v\n", err)
+		logs.Errorf("Error decoding image: %v", err)
 		return createFallbackScreenshot(false), nil
 	}
 	bounds := img.Bounds()
@@ -108,35 +113,36 @@ func (r *ADBDevice) GetScreenshot(ctx context.Context, deviceID string) (*defini
 
 	return &definitions.Screenshot{
 		Base64Data:  base64Data,
-		Width:       width, // 如果对宽和高无要求，可以省略解图
+		Width:       width,
 		Height:      height,
 		IsSensitive: false,
 	}, nil
 }
 
 func (r *ADBDevice) GetCurrentApp(ctx context.Context, deviceID string) (string, error) {
-	// adb 前缀
+
 	var cmdArgs []string
 	if deviceID != "" {
 		cmdArgs = append(cmdArgs, "-s", deviceID)
 	}
 
-	// 执行 adb shell dumpsys window
 	args := append(cmdArgs, "shell", "dumpsys", "window")
-	out, err := exec.Command(adbPath, args...).Output()
+	logs.Debugf("[GetCurrentApp] run cmd: %s %s", adbPath, strings.Join(args, " "))
+
+	output, err := exec.CommandContext(ctx, adbPath, args...).CombinedOutput()
 	if err != nil {
-		fmt.Printf("Error running dumpsys window: %v, output: %s\n", err, out)
+		logs.Errorf("Error running dumpsys window: %v, output: %s", err, output)
 		return "", fmt.Errorf("failed to run dumpsys window: %w", err)
 	}
 
-	output := string(out)
-	if output == "" {
-		fmt.Printf("dumpsys window output is empty\n")
+	outputStr := string(output)
+	if outputStr == "" {
+		logs.Errorf("dumpsys window output is empty")
 		return "", fmt.Errorf("no output from dumpsys window")
 	}
 
 	// 遍历每行查找焦点窗口信息
-	for _, line := range strings.Split(output, "\n") {
+	for _, line := range strings.Split(outputStr, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "mCurrentFocus") || strings.Contains(line, "mFocusedApp") {
 			for appName, packageName := range constants.APP_PACKAGES_ANDROID {
@@ -154,12 +160,10 @@ func (r *ADBDevice) GetCurrentApp(ctx context.Context, deviceID string) (string,
 func (r *ADBDevice) Tap(ctx context.Context, x, y int, deviceID string) error {
 	adbPrefix := r.GetADBPrefix(deviceID)
 
-	args := append(adbPrefix,
-		"shell", "input", "tap", strconv.Itoa(x), strconv.Itoa(y),
-	)
+	args := append(adbPrefix, "shell", "input", "tap", strconv.Itoa(x), strconv.Itoa(y))
+	logs.Debugf("[Tap] run cmd: %s %s", adbPath, strings.Join(args, " "))
 
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	time.Sleep(time.Second * 1)
 	return err
 }
@@ -190,9 +194,8 @@ func (r *ADBDevice) LongPress(ctx context.Context, x, y int, deviceID string) er
 		strconv.Itoa(x), strconv.Itoa(y),
 		strconv.Itoa(3000),
 	)
-
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	logs.Debugf("[LongPress] run cmd: %s %s", adbPath, strings.Join(args, " "))
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	time.Sleep(time.Second * 1)
 	return err
 }
@@ -210,30 +213,29 @@ func (r *ADBDevice) Swipe(ctx context.Context, startX, startY, endX, endY int, d
 		strconv.Itoa(durationMs),
 	)
 
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	logs.Debugf("[Swipe] run cmd: %s %s", adbPath, strings.Join(args, " "))
+
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	time.Sleep(time.Second * 1)
 	return err
 }
 
 func (r *ADBDevice) Back(ctx context.Context, deviceID string) error {
 	adbPrefix := r.GetADBPrefix(deviceID)
-	args := append(adbPrefix,
-		"shell", "input", "keyevent", "4",
-	)
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	args := append(adbPrefix, "shell", "input", "keyevent", "4")
+
+	logs.Debugf("[Back] run cmd: %s %s", adbPath, strings.Join(args, " "))
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	time.Sleep(time.Second * 1)
 	return err
 }
 
 func (r *ADBDevice) Home(ctx context.Context, deviceID string) error {
 	adbPrefix := r.GetADBPrefix(deviceID)
-	args := append(adbPrefix,
-		"shell", "input", "keyevent", "KEYCODE_HOME",
-	)
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	args := append(adbPrefix, "shell", "input", "keyevent", "KEYCODE_HOME")
+
+	logs.Debugf("[Home] run cmd: %s %s", adbPath, strings.Join(args, " "))
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	time.Sleep(time.Second * 1)
 	return err
 }
@@ -254,10 +256,15 @@ func (r *ADBDevice) LaunchApp(ctx context.Context, appName, deviceID string) (bo
 		"1",
 	)
 
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	logs.Debugf("[LaunchApp] run cmd: %s %s", adbPath, strings.Join(args, " "))
+
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	if err != nil {
+		logs.Errorf("failed to launch app, err: %v", err)
+		return false, err
+	}
 	time.Sleep(time.Second * 1)
-	return true, err
+	return true, nil
 }
 
 func (r *ADBDevice) TypeText(ctx context.Context, text, deviceID string) error {
@@ -270,22 +277,19 @@ func (r *ADBDevice) TypeText(ctx context.Context, text, deviceID string) error {
 		"-a", "ADB_INPUT_B64",
 		"--es", "msg", encoded,
 	)
+	logs.Debugf("[TypeText] run cmd: %s %s", adbPath, strings.Join(args, " "))
 
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	return err
 }
 
 func (r *ADBDevice) ClearText(ctx context.Context, deviceID string) error {
 	adbPrefix := r.GetADBPrefix(deviceID)
 
-	args := append(adbPrefix,
-		"shell", "am", "broadcast",
-		"-a", "ADB_CLEAR_TEXT",
-	)
+	args := append(adbPrefix, "shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT")
+	logs.Debugf("[ClearText] run cmd: %s %s", adbPath, strings.Join(args, " "))
 
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	return err
 }
 
@@ -293,11 +297,10 @@ func (r *ADBDevice) DetectAndSetADBKeyboard(ctx context.Context, deviceID string
 	adbPrefix := r.GetADBPrefix(deviceID)
 
 	// 获取当前输入法
-	getArgs := append(adbPrefix,
-		"shell", "settings", "get", "secure", "default_input_method",
-	)
+	getArgs := append(adbPrefix, "shell", "settings", "get", "secure", "default_input_method")
+	logs.Debugf("[DetectAndSetADBKeyboard] run cmd1: %s %s", adbPath, strings.Join(getArgs, " "))
 
-	out, err := exec.Command(getArgs[0], getArgs[1:]...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, getArgs[0], getArgs[1:]...).CombinedOutput()
 	if err != nil {
 		return "", err
 	}
@@ -306,11 +309,12 @@ func (r *ADBDevice) DetectAndSetADBKeyboard(ctx context.Context, deviceID string
 
 	// 如未启用 ADB Keyboard，则切换
 	if !strings.Contains(currentIME, "com.android.adbkeyboard/.AdbIME") {
-		setArgs := append(adbPrefix,
-			"shell", "ime", "set", "com.android.adbkeyboard/.AdbIME",
-		)
 
-		if _, err := exec.Command(setArgs[0], setArgs[1:]...).CombinedOutput(); err != nil {
+		setArgs := append(adbPrefix, "shell", "ime", "set", "com.android.adbkeyboard/.AdbIME")
+		logs.Debugf("[DetectAndSetADBKeyboard] run cmd2: %s %s", adbPath, strings.Join(setArgs, " "))
+
+		_, err := exec.CommandContext(ctx, setArgs[0], setArgs[1:]...).CombinedOutput()
+		if err != nil {
 			return "", err
 		}
 	}
@@ -327,13 +331,11 @@ func (r *ADBDevice) RestoreKeyboard(ctx context.Context, ime, deviceID string) e
 	}
 
 	adbPrefix := r.GetADBPrefix(deviceID)
+	args := append(adbPrefix, "shell", "ime", "set", ime)
 
-	args := append(adbPrefix,
-		"shell", "ime", "set", ime,
-	)
+	logs.Debugf("[RestoreKeyboard] run cmd: %s %s", adbPath, strings.Join(args, " "))
 
-	cmd := exec.Command(args[0], args[1:]...)
-	_, err := cmd.CombinedOutput()
+	_, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
 	return err
 }
 

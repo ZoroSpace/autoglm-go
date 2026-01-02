@@ -3,7 +3,11 @@ package helper
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+
+	logs "github.com/sirupsen/logrus"
 )
 
 type Action map[string]any
@@ -15,39 +19,24 @@ type ActionResult struct {
 	RequiresConfirmation bool
 }
 
-func ParseAction(response string) (Action, error) {
-	fmt.Printf("Parsing action: %s\n", response)
+func ParseAction(rawActionStr string) (Action, error) {
+	logs.Debugf("begin to parse action: %s", rawActionStr)
 
-	response = strings.TrimSpace(response)
+	rawActionStr = strings.TrimSpace(rawActionStr)
 
-	// case 1: do(action="Type" ...) / do(action="Type_Name" ...)
-	if strings.HasPrefix(response, `do(action="Type"`) ||
-		strings.HasPrefix(response, `do(action="Type_Name"`) {
-
-		text, err := extractQuotedArg(response, "text")
+	// case 1: do(action=...)
+	if strings.HasPrefix(rawActionStr, "do(") {
+		action, err := parseDoCall(rawActionStr)
 		if err != nil {
-			return nil, err
-		}
-
-		return Action{
-			"_metadata": "do",
-			"action":    "Type",
-			"text":      text,
-		}, nil
-	}
-
-	// case 2: generic do(...)
-	if strings.HasPrefix(response, "do(") {
-		action, err := parseDoCall(response)
-		if err != nil {
+			logs.Errorf("failed to parse do() action, rawActionStr: %s, err: %v", rawActionStr, err)
 			return nil, fmt.Errorf("failed to parse do() action: %w", err)
 		}
 		return action, nil
 	}
 
-	// case 3: finish(message="...")
-	if strings.HasPrefix(response, "finish") {
-		msg, err := extractQuotedArg(response, "message")
+	// case 2: finish(message="...")
+	if strings.HasPrefix(rawActionStr, "finish") {
+		msg, err := parseFinishMessage(rawActionStr)
 		if err != nil {
 			return nil, err
 		}
@@ -57,8 +46,7 @@ func ParseAction(response string) (Action, error) {
 			"message":   msg,
 		}, nil
 	}
-
-	return nil, fmt.Errorf("failed to parse action: %s", response)
+	return nil, fmt.Errorf("failed to parse action: %s", rawActionStr)
 }
 
 func parseDoCall(expr string) (Action, error) {
@@ -77,7 +65,6 @@ func parseDoCall(expr string) (Action, error) {
 		return action, nil
 	}
 
-	// parts := splitArgs(body)
 	parts := strings.Split(body, ", ")
 
 	for _, part := range parts {
@@ -99,59 +86,18 @@ func parseDoCall(expr string) (Action, error) {
 	return action, nil
 }
 
-func extractQuotedArg(s, key string) (string, error) {
-	idx := strings.Index(s, key+"=")
-	if idx == -1 {
-		return "", fmt.Errorf("missing %s", key)
+var messageRe = regexp.MustCompile(`message="((?:\\.|[^"])*)"`)
+
+func parseFinishMessage(s string) (string, error) {
+	matches := messageRe.FindStringSubmatch(s)
+	if len(matches) < 2 {
+		return "", errors.New("message not found")
 	}
-
-	rest := s[idx+len(key)+1:]
-	if len(rest) < 2 || rest[0] != '"' {
-		return "", fmt.Errorf("invalid %s format", key)
-	}
-
-	rest = rest[1:]
-	end := strings.LastIndex(rest, `"`)
-
-	if end == -1 {
-		return "", fmt.Errorf("unterminated string for %s", key)
-	}
-
-	return rest[:end], nil
-}
-
-func splitArgs(s string) []string {
-	var (
-		args     []string
-		current  strings.Builder
-		inQuotes bool
-	)
-
-	for _, r := range s {
-		switch r {
-		case '"':
-			inQuotes = !inQuotes
-			current.WriteRune(r)
-		case ',':
-			if inQuotes {
-				current.WriteRune(r)
-			} else {
-				args = append(args, strings.TrimSpace(current.String()))
-				current.Reset()
-			}
-		default:
-			current.WriteRune(r)
-		}
-	}
-
-	if current.Len() > 0 {
-		args = append(args, strings.TrimSpace(current.String()))
-	}
-	return args
+	return matches[1], nil
 }
 
 func parseLiteral(s string) (any, error) {
-	fmt.Printf("begin to parse literal: %s\n", s)
+	logs.Debugf("begin to parse literal: %s", s)
 	// string
 	if strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`) {
 		return s[1 : len(s)-1], nil
@@ -164,6 +110,7 @@ func parseLiteral(s string) (any, error) {
 	if s == "false" {
 		return false, nil
 	}
+
 	// int[]
 	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
 		content := strings.TrimSpace(s[1 : len(s)-1])
@@ -175,36 +122,24 @@ func parseLiteral(s string) (any, error) {
 		result := make([]int, 0, len(parts))
 
 		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			var v int
-			if _, err := fmt.Sscanf(p, "%d", &v); err != nil {
+			v, err := strconv.Atoi(strings.TrimSpace(p))
+			if err != nil {
 				return nil, fmt.Errorf("invalid int in array: %s", p)
 			}
 			result = append(result, v)
 		}
 		return result, nil
 	}
+
 	// int
-	var i int
-	if _, err := fmt.Sscanf(s, "%d", &i); err == nil {
+	if i, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
 		return i, nil
 	}
 
 	// float
-	var f float64
-	if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+	if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
 		return f, nil
 	}
 
 	return nil, fmt.Errorf("unsupported literal: %s", s)
-}
-
-func Do(kwargs map[string]any) Action {
-	kwargs["_metadata"] = "do"
-	return kwargs
-}
-
-func Finish(kwargs map[string]any) Action {
-	kwargs["_metadata"] = "finish"
-	return kwargs
 }

@@ -1,18 +1,20 @@
 package phoneagent
 
 import (
-	"autoglm-go/phoneagent/definitions"
-	"autoglm-go/phoneagent/helper"
-	"autoglm-go/phoneagent/llm"
-	"autoglm-go/utils"
 	"bufio"
 	"context"
 	"fmt"
-	"github.com/sashabaranov/go-openai"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"autoglm-go/phoneagent/definitions"
+	"autoglm-go/phoneagent/helper"
+	"autoglm-go/phoneagent/llm"
+	"autoglm-go/utils"
+	"github.com/sashabaranov/go-openai"
+	logs "github.com/sirupsen/logrus"
 )
 
 type PhoneAgent struct {
@@ -45,9 +47,9 @@ type StepResult struct {
 }
 
 func (r *PhoneAgent) Run(ctx context.Context, task string) (string, error) {
-	r.Reset(ctx)
 	result, err := r.ExecuteStep(ctx, task, true)
 	if err != nil {
+		logs.Errorf("Failed to execute step: %v", err)
 		return "", err
 	}
 	if result.Finished {
@@ -57,6 +59,7 @@ func (r *PhoneAgent) Run(ctx context.Context, task string) (string, error) {
 	for r.StepCount < r.AgentConfig.MaxSteps {
 		result, err = r.ExecuteStep(ctx, "", false)
 		if err != nil {
+			logs.Errorf("Failed to execute step: %v", err)
 			return "", err
 		}
 		if result.Finished {
@@ -69,7 +72,7 @@ func (r *PhoneAgent) Run(ctx context.Context, task string) (string, error) {
 func (r *PhoneAgent) Step(ctx context.Context, task string) (*StepResult, error) {
 	isFirst := len(r.State) == 0
 	if isFirst && len(task) == 0 {
-		fmt.Printf("task is required for the first step")
+		logs.Errorf("task is required for the first step")
 		return nil, fmt.Errorf("task is required for the first step")
 	}
 	return r.ExecuteStep(ctx, task, isFirst)
@@ -79,63 +82,66 @@ func (r *PhoneAgent) ExecuteStep(ctx context.Context, userPrompt string, isFirst
 	r.StepCount += 1
 
 	device := r.Device
-	screenshot, err := device.GetScreenshot(ctx, r.AgentConfig.DeviceID)
-	if err != nil {
-		fmt.Printf("[ExecuteStep] Failed to get screenshot: %v\n", err)
-		return &StepResult{
-			Success:  false,
-			Finished: true,
-			Message:  fmt.Sprintf("Failed to get screenshot: %v", err),
-		}, nil
-	}
-	currentApp, err := device.GetCurrentApp(ctx, r.AgentConfig.DeviceID)
-	if err != nil {
-		return &StepResult{
-			Success:  false,
-			Finished: true,
-			Message:  fmt.Sprintf("Failed to get current app: %v", err),
-		}, nil
-	}
+	screenshot, _ := device.GetScreenshot(ctx, r.AgentConfig.DeviceID)
+	currentApp, _ := device.GetCurrentApp(ctx, r.AgentConfig.DeviceID)
 
 	if isFirstStep {
+		// system prompt
 		r.State = append(r.State,
 			helper.CreateSystemMessage(r.AgentConfig.GetSystemPrompt()),
 		)
 
 		screenInfo := helper.BuildScreenInfo(currentApp)
 		textContent := fmt.Sprintf("%s\n\n%s", userPrompt, screenInfo)
-		r.State = append(r.State, helper.CreateUserMessage(textContent, &screenshot.Base64Data))
+
+		// user prompt
+		r.State = append(r.State,
+			helper.CreateUserMessage(textContent, &screenshot.Base64Data),
+		)
 	} else {
 		screenInfo := helper.BuildScreenInfo(currentApp)
 		textContent := fmt.Sprintf("** Screen Info **\n\n%s", screenInfo)
-		r.State = append(r.State, helper.CreateUserMessage(textContent, &screenshot.Base64Data))
+
+		// user prompt
+		r.State = append(r.State,
+			helper.CreateUserMessage(textContent, &screenshot.Base64Data),
+		)
 	}
 
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Printf("💭 %s:\n", helper.GetMessage("thinking", r.AgentConfig.Lang))
-	fmt.Println(strings.Repeat("-", 50))
+	// print user message
+	helper.PrintChatMessage(&r.State[len(r.State)-1])
+
+	logs.Info(strings.Repeat("=", 50))
+	logs.Infof("💭 %s:", helper.GetMessage("thinking", r.AgentConfig.Lang))
+	logs.Info(strings.Repeat("-", 50))
 
 	response, err := r.ModelClient.Request(ctx, r.State)
 	if err != nil {
-		fmt.Printf("model request failed: %v\n", err)
+		logs.Errorf("failed to get model response, err: %v", err)
 		return &StepResult{
 			Success:  false,
-			Finished: true,
-			Message:  fmt.Sprintf("Failed to request model: %v", err),
+			Finished: false,
+			Message:  fmt.Sprintf("failed to get model response, err: %v", err),
 		}, nil
 	}
-	fmt.Printf("💭 model response: %s\n", utils.JsonString(response))
+
+	logs.Debugf("💭 model response: %s", utils.JsonString(response))
+
 	action, err := helper.ParseAction(response.Action)
 	if err != nil {
-		fmt.Printf("Failed to parse action: %v\n", err)
-		action = helper.Finish(map[string]any{"message": response.Action})
+		logs.Errorf("failed to parse action, err: %v", err)
+		return &StepResult{
+			Success:  false,
+			Finished: false,
+			Message:  fmt.Sprintf("failed to parse action, err: %v", err),
+		}, nil
 	}
 
 	// Print thinking process
-	fmt.Println(strings.Repeat("-", 50))
-	fmt.Printf("🎯 %s:\n", response.Action)
-	fmt.Printf("%s\n", utils.JsonIndent(action))
-	fmt.Println(strings.Repeat("=", 50))
+	logs.Info(strings.Repeat("-", 50))
+	logs.Infof("🎯 %s", response.Action)
+	logs.Debugf("resp action: %s \nparsed action:%s", utils.JsonString(response.Action), utils.JsonString(action))
+	logs.Info(strings.Repeat("=", 50))
 
 	// Remove image from context to save space
 	r.State[len(r.State)-1] = helper.RemoveImagesFromMessage(r.State[len(r.State)-1])
@@ -143,43 +149,40 @@ func (r *PhoneAgent) ExecuteStep(ctx context.Context, userPrompt string, isFirst
 	// Execute action
 	actionResult, err := r.ExecuteAction(ctx, action, screenshot.Width, screenshot.Height)
 	if err != nil {
-		fmt.Printf("Failed to execute action: %v\n", err)
-		actionResult, err = r.ExecuteAction(ctx,
-			helper.Finish(
-				map[string]any{
-					"message": fmt.Sprintf("Failed to execute action: %v", err),
-				},
-			),
-			screenshot.Width,
-			screenshot.Height)
+		logs.Errorf("failed to execute action, err: %v", err)
+		actionResult = helper.ActionResult{
+			Success:      true,
+			ShouldFinish: true,
+			Message:      fmt.Sprintf("Failed to execute action: %v", err),
+		}
 	}
 
 	thinkingContent := fmt.Sprintf("<think>%s</think><answer>%s</answer>", response.Thinking, response.Action)
 	r.State = append(r.State, helper.CreateAssistantMessage(thinkingContent))
 
-	finished := utils.AnyToString(action["_metadata"]) == "finish" || actionResult.ShouldFinish
-	if finished {
+	// print assistant message
+	helper.PrintChatMessage(&r.State[len(r.State)-1])
+
+	if actionResult.ShouldFinish {
 		var displayMsg string
 		if actionResult.Message != "" {
 			displayMsg = actionResult.Message
-		} else if msg := utils.AnyToString(action["message"]); msg != "" {
-			displayMsg = msg
 		} else {
 			displayMsg = helper.GetMessage("done", r.AgentConfig.Lang)
 		}
 
-		fmt.Println("\n" + "🎉 " + strings.Repeat("=", 48))
-		fmt.Printf(
+		logs.Info(strings.Repeat("=", 50))
+		logs.Infof(
 			"✅ %s: %s\n",
 			helper.GetMessage("task_completed", r.AgentConfig.Lang),
 			displayMsg,
 		)
-		fmt.Println(strings.Repeat("=", 50))
+		logs.Info(strings.Repeat("=", 50))
 	}
 
 	stepResult := &StepResult{
 		Success:  actionResult.Success,
-		Finished: finished,
+		Finished: actionResult.ShouldFinish,
 		Action:   action,
 		Thinking: response.Thinking,
 	}
@@ -205,7 +208,7 @@ func (r *PhoneAgent) ExecuteAction(ctx context.Context, action helper.Action, sc
 	if actionType != "do" {
 		return helper.ActionResult{
 			Success:      false,
-			ShouldFinish: true,
+			ShouldFinish: false,
 			Message:      fmt.Sprintf("Unknown action type: %s", actionType),
 		}, nil
 	}
@@ -215,14 +218,6 @@ func (r *PhoneAgent) ExecuteAction(ctx context.Context, action helper.Action, sc
 	case "Launch":
 		return r.handleLaunch(ctx, action, screenWidth, screenHeight)
 	case "Tap":
-		element := utils.AnyToIntSlice(action["element"])
-		if len(element) != 2 {
-			return helper.ActionResult{
-				Success:      false,
-				ShouldFinish: true,
-				Message:      "Invalid element coordinates",
-			}, nil
-		}
 		return r.handleTap(ctx, action, screenWidth, screenHeight)
 	case "Type":
 		return r.handleType(ctx, action, screenWidth, screenHeight)
@@ -251,7 +246,7 @@ func (r *PhoneAgent) ExecuteAction(ctx context.Context, action helper.Action, sc
 	default:
 		return helper.ActionResult{
 			Success:      false,
-			ShouldFinish: true,
+			ShouldFinish: false,
 			Message:      fmt.Sprintf("Unknown action name: %s", actionName),
 		}, nil
 	}
@@ -268,11 +263,11 @@ func (r *PhoneAgent) handleLaunch(ctx context.Context, action helper.Action, scr
 	}
 	_, err := r.Device.LaunchApp(ctx, appName, r.AgentConfig.DeviceID)
 	if err != nil {
-		fmt.Printf("Failed to launch app: %v\n", err)
+		logs.Errorf("failed to launch app, err: %v", err)
 		return helper.ActionResult{
 			Success:      false,
 			ShouldFinish: false,
-			Message:      fmt.Sprintf("Failed to launch app: %v", err),
+			Message:      fmt.Sprintf("failed to launch app, err: %v", err),
 		}, nil
 	}
 
@@ -310,13 +305,14 @@ func (r *PhoneAgent) handleTap(ctx context.Context, action helper.Action, screen
 	if len(element) != 2 {
 		return helper.ActionResult{
 			Success:      false,
-			ShouldFinish: true,
+			ShouldFinish: false,
 			Message:      "Invalid element coordinates",
 		}, nil
 	}
+
 	x, y := r.convertRelativeToAbsolute(element, screenWidth, screenHeight)
-	if _, ok := action["message"]; ok {
-		if !r.DefaultConfirmation(utils.AnyToString(action["message"])) {
+	if msg, ok := action["message"]; ok {
+		if !r.DefaultConfirmation(utils.AnyToString(msg)) {
 			return helper.ActionResult{
 				Success:      false,
 				ShouldFinish: true,
@@ -364,7 +360,7 @@ func (r *PhoneAgent) handleSwipe(ctx context.Context, action helper.Action, scre
 	if len(start) != 2 || len(end) != 2 {
 		return helper.ActionResult{
 			Success:      false,
-			ShouldFinish: true,
+			ShouldFinish: false,
 			Message:      "Invalid swipe coordinates",
 		}, nil
 	}

@@ -1,22 +1,25 @@
 package main
 
 import (
-	"autoglm-go/constants"
-	"autoglm-go/phoneagent"
-	"autoglm-go/phoneagent/definitions"
-	"autoglm-go/utils"
 	"bufio"
 	"context"
 	"fmt"
-	"github.com/samber/lo"
-	"github.com/sashabaranov/go-openai"
-	"github.com/spf13/cobra"
 	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"autoglm-go/constants"
+	"autoglm-go/phoneagent"
+	"autoglm-go/phoneagent/definitions"
+	"autoglm-go/phoneagent/helper"
+	"autoglm-go/utils"
+	"github.com/samber/lo"
+	"github.com/sashabaranov/go-openai"
+	logs "github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
 )
 
 // Config holds all the configuration values from command line arguments
@@ -40,6 +43,7 @@ type Config struct {
 	Lang       string `json:"lang"`
 	DeviceType string `json:"device_type"`
 	Task       string `json:"task"`
+	Debug      bool   `json:"debug"`
 }
 
 var rootCmd = &cobra.Command{
@@ -130,7 +134,7 @@ func getEnvFloat32(key string, defaultValue float32) float32 {
 func init() {
 	// Model options
 	rootCmd.PersistentFlags().StringVar(&config.BaseURL, "base-url",
-		getEnv("PHONE_AGENT_BASE_URL", "http://localhost:8000/v1"),
+		getEnv("PHONE_AGENT_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
 		"Model API base URL")
 
 	rootCmd.PersistentFlags().StringVar(&config.Model, "model",
@@ -195,10 +199,27 @@ func init() {
 		"adb",
 		"Device type: adb for Android, ios for iPhone (default: adb)",
 	)
+
+	rootCmd.PersistentFlags().BoolVar(&config.Debug, "debug", false,
+		"Enable debug mode (default: false)")
+
+}
+
+type MessageOnlyFormatter struct{}
+
+func (f *MessageOnlyFormatter) Format(entry *logs.Entry) ([]byte, error) {
+	return []byte(entry.Message + "\n"), nil // 只返回消息 + 换行符
 }
 
 func main() {
 	parseArgs()
+
+	logs.SetFormatter(&MessageOnlyFormatter{})
+	logs.SetOutput(os.Stdout)
+
+	if config.Debug {
+		logs.SetLevel(logs.DebugLevel)
+	}
 
 	ctx := context.Background()
 
@@ -206,41 +227,42 @@ func main() {
 	if config.ListApps {
 		var supportedApps []string
 		if config.DeviceType == constants.IOS {
-			fmt.Println("Supported iOS apps:")
-			fmt.Println("\nNote: For iOS apps, Bundle IDs are configured in:")
-			fmt.Println("  constants/apps.go")
-			fmt.Println("\nCurrently configured apps:")
+			logs.Info("Note: For iOS apps, Bundle IDs are configured in: constants/apps.go")
+			logs.Info("Supported iOS apps:")
 			supportedApps = lo.Keys(constants.APP_PACKAGES_IOS)
 		} else {
-			fmt.Println("Supported Android apps:")
+			logs.Info("Supported Android apps:")
 			supportedApps = lo.Keys(constants.APP_PACKAGES_ANDROID)
 		}
 		sort.Strings(supportedApps)
 
 		for _, app := range supportedApps {
-			fmt.Printf("  - %s\n", app)
+			logs.Infof(" - %s", app)
 		}
 		return
 	}
 
 	device, err := phoneagent.CreateDevice(config.DeviceType)
 	if err != nil {
-		fmt.Printf("creating device failed, err: %v\n", err)
+		logs.Errorf("creating device failed, err: %v", err)
 		return
 	}
 
 	// Handle device commands (these may need partial system checks)
-	if err := handleDeviceCommands(ctx, device); err != nil {
-		fmt.Printf("✗ %s\n", "handle device commands failed")
+	if hitCmd := handleDeviceCommands(ctx, device); hitCmd {
 		return
 	}
+
 	if passed := checkSystemRequirements(ctx, config.DeviceType, config.WdaUrl); !passed {
-		fmt.Printf("✗ %s\n", "check system requirements failed")
+		logs.Info(strings.Repeat("-", 50))
+		logs.Error("❌ System check failed. Please fix the issues above.")
+		logs.Error("❌ check system requirements failed")
 		return
 	}
 
 	if passed := checkModelAPI(ctx, config.BaseURL, config.Model, config.APIKey); !passed {
-		fmt.Printf("✗ %s\n", "check model api failed")
+		logs.Error("❌ Model API check failed. Please fix the issues above.")
+		logs.Error("❌ check model api failed")
 		return
 	}
 
@@ -258,7 +280,6 @@ func main() {
 		MaxSteps: config.MaxSteps,
 		DeviceID: config.DeviceID,
 		Lang:     config.Lang,
-		Verbose:  !config.Quiet,
 		WdaUrl:   config.WdaUrl,
 	}
 
@@ -269,23 +290,23 @@ func main() {
 
 	// Run with provided task or enter interactive mode
 	if config.Task != "" {
-		fmt.Printf("\nTask: %s\n", config.Task)
+		logs.Infof("Task: %s", config.Task)
 		result, err := phoneAgent.Run(ctx, config.Task)
 		if err != nil {
-			fmt.Printf("Error running task: %v\n", err)
+			logs.Errorf("Error running task: %v", err)
 			return
 		}
-		fmt.Printf("\nResult: %s\n", result)
+		logs.Infof("🎉 %s: %s", helper.GetMessage("result", config.Lang), result)
 	} else {
 		// Interactive mode
-		fmt.Println("\nEntering interactive mode. Type 'quit' to exit.")
+		logs.Info("Entering interactive mode. Type 'quit' to exit.")
 
 		reader := bufio.NewReader(os.Stdin)
 		for {
 			fmt.Print("Enter your task: ")
 			task, err := reader.ReadString('\n')
 			if err != nil {
-				fmt.Printf("\nError reading input: %v\n", err)
+				logs.Errorf("Error reading input: %v", err)
 				continue
 			}
 
@@ -293,7 +314,7 @@ func main() {
 
 			// Check for quit commands
 			if strings.ToLower(task) == "quit" || strings.ToLower(task) == "exit" || strings.ToLower(task) == "q" {
-				fmt.Println("Goodbye!")
+				logs.Info("Goodbye!")
 				break
 			}
 
@@ -305,10 +326,11 @@ func main() {
 			fmt.Println()
 			result, err := phoneAgent.Run(ctx, task)
 			if err != nil {
-				fmt.Printf("\nError: %v\n", err)
+				logs.Errorf("Error: %v", err)
 				continue
 			}
-			fmt.Printf("\nResult: %s\n", result)
+
+			logs.Infof("🎉 %s: %s", helper.GetMessage("result", config.Lang), result)
 
 			// Reset agent for next task
 			phoneAgent.Reset(ctx)
@@ -326,25 +348,22 @@ func parseArgs() *Config {
 
 	return config
 }
-func validateArgs(cmd *cobra.Command, args []string) error {
-	// Handle enable-tcpip with optional argument
-	if cmd.Flags().Changed("enable-tcpip") && config.EnableTCPIP == 0 {
-		config.EnableTCPIP = 5555 // Default port
-	}
 
+func validateArgs(cmd *cobra.Command, args []string) error {
 	// Validate lang and device-type choices
 	if config.Lang != "cn" && config.Lang != "en" {
 		return fmt.Errorf("invalid language option: %s. Must be 'cn' or 'en'", config.Lang)
 	}
 
-	if config.DeviceType != "adb" && config.DeviceType != "ios" {
-		return fmt.Errorf("invalid device type: %s. Must be 'adb' or 'ios'", config.DeviceType)
+	// only allow adb for now
+	if config.DeviceType != "adb" {
+		return fmt.Errorf("invalid device type: %s. Must be 'adb'", config.DeviceType)
 	}
 
 	return nil
 }
 
-func handleDeviceCommands(ctx context.Context, device phoneagent.Device) error {
+func handleDeviceCommands(ctx context.Context, device phoneagent.Device) bool {
 	deviceType := config.DeviceType
 
 	// 处理iOS特定命令
@@ -354,67 +373,63 @@ func handleDeviceCommands(ctx context.Context, device phoneagent.Device) error {
 
 	// 处理 --list-devices
 	if config.ListDevices {
-		devices, err := device.ListDevices(ctx)
-		if err != nil {
-			fmt.Printf("listing devices failed, err: %v\n", err)
-			return err
-		}
+		devices, _ := device.ListDevices(ctx)
 		if len(devices) == 0 {
-			fmt.Println("No devices connected.")
+			logs.Info("No devices connected.")
 		} else {
-			fmt.Println("Connected devices:")
-			fmt.Println(strings.Repeat("-", 60))
+			logs.Info("Connected devices:")
+			logs.Info(strings.Repeat("-", 60))
 			for _, d := range devices {
-				statusIcon := "✓"
+				statusIcon := "✅"
 				if d.Status != "device" {
-					statusIcon = "✗"
+					statusIcon = "❌"
 				}
 				connType := d.ConnectionType
 				modelInfo := ""
 				if d.Model != "" {
 					modelInfo = fmt.Sprintf(" (%s)", d.Model)
 				}
-				fmt.Printf("  %s %-30s [%s]%s\n", statusIcon, d.DeviceID, connType, modelInfo)
+				logs.Infof("  %s %-30s [%s]%s", statusIcon, d.DeviceID, connType, modelInfo)
 			}
 		}
-		return nil
+		return true
 	}
 
 	// 处理 --connect
 	if config.Connect != "" {
-		fmt.Printf("Connecting to %s...\n", config.Connect)
+		logs.Infof("Connecting to %s...", config.Connect)
 		message, err := device.Connect(ctx, config.Connect)
 		if err != nil {
-			fmt.Printf("✗ %s\n", message)
-			return err
+			logs.Errorf("❌%s", message)
+		} else {
+			logs.Infof("✅ %s", message)
 		}
-		fmt.Printf("✓ %s\n", message)
-		return nil
+		return true
 	}
 
 	// 处理 --enable-tcpip
 	if config.EnableTCPIP > 0 {
 		port := config.EnableTCPIP
-		fmt.Printf("Enabling TCP/IP debugging on port %d...\n", port)
+		logs.Infof("Enabling TCP/IP debugging on port %d...", port)
 
 		err := device.EnableTCPIP(ctx, port, config.DeviceID)
 		if err != nil {
-			fmt.Printf("✗ %s\n", "enable tcpip failed")
-			return err
+			logs.Errorf("❌ %s", "enable tcpip failed")
+		} else {
+			logs.Infof("✅ %s", "enable tcpip success")
 		}
-		fmt.Printf("✓ %s\n", "enable tcpip success")
-		return nil
+		return true
 	}
 
 	// 处理 --get-device-ip
 	if len(config.GetDeviceIP) > 0 {
 		ip, err := device.GetDeviceIP(ctx, config.GetDeviceIP)
 		if err != nil {
-			fmt.Printf("✗ %s\n", "get device ip failed")
-			return err
+			logs.Errorf("❌ %s", "get device ip failed")
+		} else {
+			logs.Infof("✅ %s: %s", "device ip", ip)
 		}
-		fmt.Printf("✓ %s: %s\n", "device ip", ip)
-		return nil
+		return true
 	}
 
 	// 处理 --disconnect
@@ -425,36 +440,35 @@ func handleDeviceCommands(ctx context.Context, device phoneagent.Device) error {
 		)
 
 		if config.Disconnect == "all" {
-			fmt.Println("Disconnecting all remote devices...")
+			logs.Info("Disconnecting all remote devices...")
 			message, err = device.Disconnect(ctx, "") // 断开所有连接
 		} else {
-			fmt.Printf("Disconnecting from %s...\n", config.Disconnect)
+			logs.Infof("Disconnecting from %s...", config.Disconnect)
 			message, err = device.Disconnect(ctx, config.Disconnect)
 		}
-		fmt.Printf("Disconnecting result: %s\n", message)
+		logs.Infof("Disconnecting result: %s", message)
 
 		var statusSymbol string
 		if err != nil {
-			statusSymbol = "✗"
+			statusSymbol = "❌"
 		} else {
-			statusSymbol = "✓"
+			statusSymbol = "✅"
 		}
-		fmt.Printf("%s %s\n", statusSymbol, message)
-		return err
+		logs.Infof("%s %s", statusSymbol, message)
+		return true
 	}
 
-	return nil
+	return false
 }
 
-func handleIOSDeviceCommands(ctx context.Context) error {
+func handleIOSDeviceCommands(ctx context.Context) bool {
 	// todo
-	return nil
+	return false
 }
-func checkSystemRequirements(ctx context.Context, deviceType string, wdaURL string) bool {
-	fmt.Println("🔍 Checking system requirements...")
-	fmt.Println(strings.Repeat("-", 50))
 
-	allPassed := true
+func checkSystemRequirements(ctx context.Context, deviceType string, wdaURL string) bool {
+	logs.Info("🔍 Checking system requirements...")
+	logs.Info(strings.Repeat("-", 50))
 
 	// Determine tool name and command
 	var toolName, toolCmd string
@@ -467,56 +481,48 @@ func checkSystemRequirements(ctx context.Context, deviceType string, wdaURL stri
 	}
 
 	// Check 1: Tool installed
-	fmt.Printf("1. Checking %s installation... ", toolName)
+	logs.Infof("1. Checking %s installation... ", toolName)
 	_, err := exec.LookPath(toolCmd)
 	if err != nil {
-		fmt.Println("❌ FAILED")
-		fmt.Printf("   Error: %s is not installed or not in PATH.\n", toolName)
-		fmt.Printf("   Solution: Install %s:\n", toolName)
+		logs.Errorf("❌ FAILED")
+		logs.Infof("   Error: %s is not installed or not in PATH.", toolName)
+		logs.Infof("   Solution: Install %s:", toolName)
 		if deviceType == constants.ADB {
-			fmt.Println("     - macOS: brew install android-platform-tools")
-			fmt.Println("     - Linux: sudo apt install android-tools-adb")
-			fmt.Println("     - Windows: Download from https://developer.android.com/studio/releases/platform-tools")
+			logs.Infof("     - macOS: brew install android-platform-tools")
+			logs.Infof("     - Linux: sudo apt install android-tools-adb")
+			logs.Infof("     - Windows: Download from https://developer.android.com/studio/releases/platform-tools")
 		} else { // IOS
-			fmt.Println("     - macOS: brew install libimobiledevice")
-			fmt.Println("     - Linux: sudo apt-get install libimobiledevice-utils")
+			logs.Infof("     - macOS: brew install libimobiledevice")
+			logs.Infof("     - Linux: sudo apt-get install libimobiledevice-utils")
 		}
-		allPassed = false
-	} else {
-		// Double check by running version command
-		var versionCmd *exec.Cmd
-		if deviceType == constants.ADB {
-			versionCmd = exec.Command(toolCmd, "version")
-		} else { // IOS
-			versionCmd = exec.Command(toolCmd, "-ln")
-		}
-
-		output, err := versionCmd.Output()
-		if err != nil {
-			fmt.Println("❌ FAILED")
-			fmt.Printf("   Error: %s command failed to run: %v\n", toolName, err)
-			allPassed = false
-		}
-		lines := strings.Split(string(output), "\n")
-		versionLine := ""
-		if len(lines) > 0 {
-			versionLine = strings.TrimSpace(lines[0])
-		}
-		if versionLine == "" {
-			versionLine = "installed"
-		}
-		fmt.Printf("✅ OK (%s)\n", versionLine)
-	}
-
-	// If tool is not installed, skip remaining checks
-	if !allPassed {
-		fmt.Println(strings.Repeat("-", 50))
-		fmt.Println("❌ System check failed. Please fix the issues above.")
 		return false
 	}
+	// Double check by running version command
+	var versionCmd *exec.Cmd
+	if deviceType == constants.ADB {
+		versionCmd = exec.Command(toolCmd, "version")
+	} else { // IOS
+		versionCmd = exec.Command(toolCmd, "-ln")
+	}
+
+	output, err := versionCmd.Output()
+	if err != nil {
+		logs.Errorf("❌ FAILED")
+		logs.Infof("   Error: %s command failed to run: %v", toolName, err)
+		return false
+	}
+	lines := strings.Split(string(output), "\n")
+	versionLine := ""
+	if len(lines) > 0 {
+		versionLine = strings.TrimSpace(lines[0])
+	}
+	if versionLine == "" {
+		versionLine = "installed"
+	}
+	logs.Infof("✅ OK (%s)", versionLine)
 
 	// Check 2: Device connected
-	fmt.Print("2. Checking connected devices... ")
+	logs.Infof("2. Checking connected devices... ")
 	var devices []string
 	var deviceIDs []string
 
@@ -524,9 +530,9 @@ func checkSystemRequirements(ctx context.Context, deviceType string, wdaURL stri
 		cmd := exec.Command("adb", "devices")
 		output, err := cmd.CombinedOutput() // 捕获 stdout + stderr
 		if err != nil {
-			fmt.Println("❌ FAILED")
-			fmt.Printf("   Error: %s command timed out: %v\n", toolName, err)
-			allPassed = false
+			logs.Errorf("❌ FAILED")
+			logs.Infof("   Error: %s command timed out: %v", toolName, err)
+			return false
 		}
 		lines := strings.Split(string(output), "\n")
 		for _, line := range lines[1:] { // 跳过第一行（header）
@@ -544,97 +550,61 @@ func checkSystemRequirements(ctx context.Context, deviceType string, wdaURL stri
 	}
 
 	if len(devices) == 0 {
-		fmt.Println("❌ FAILED")
-		fmt.Println("   Error: No devices connected.")
-		fmt.Println("   Solution:")
+		logs.Errorf("❌ FAILED")
+		logs.Infof("   Error: No devices connected.")
+		logs.Infof("   Solution:")
 		if deviceType == constants.ADB {
-			fmt.Println("     1. Enable USB debugging on your Android device")
-			fmt.Println("     2. Connect via USB and authorize the connection")
-			fmt.Println("     3. Or connect remotely: go run main.go --connect <ip>:<port>")
+			logs.Infof("     1. Enable USB debugging on your Android device")
+			logs.Infof("     2. Connect via USB and authorize the connection")
+			logs.Infof("     3. Or connect remotely: go run main.go --connect <ip>:<port>")
 		} else { // IOS
-			fmt.Println("     1. Connect your iOS device via USB")
-			fmt.Println("     2. Unlock device and tap 'Trust This Computer'")
-			fmt.Println("     3. Verify: idevice_id -l")
-			fmt.Println("     4. Or connect via WiFi using device IP")
+			logs.Infof("     1. Connect your iOS device via USB")
+			logs.Infof("     2. Unlock device and tap 'Trust This Computer'")
+			logs.Infof("     3. Verify: idevice_id -l")
+			logs.Infof("     4. Or connect via WiFi using device IP")
 		}
-		allPassed = false
-	} else {
-		displayIDs := deviceIDs
-		if len(displayIDs) > 2 {
-			displayIDs = deviceIDs[:2]
-			displayIDs = append(displayIDs, "...")
-		}
-		fmt.Printf("✅ OK (%d device(s): %s)\n", len(devices), strings.Join(displayIDs, ", "))
-	}
-
-	// If no device connected, skip ADB Keyboard check
-	if !allPassed {
-		fmt.Println(strings.Repeat("-", 50))
-		fmt.Println("❌ System check failed. Please fix the issues above.")
 		return false
 	}
+	displayIDs := deviceIDs
+	if len(displayIDs) > 2 {
+		displayIDs = deviceIDs[:2]
+		displayIDs = append(displayIDs, "...")
+	}
+	logs.Infof("✅ OK (%d device(s): %s)", len(devices), strings.Join(displayIDs, ", "))
 
 	// Check 3: ADB Keyboard installed (only for ADB) or WebDriverAgent (for iOS)
 	if deviceType == constants.ADB {
-		fmt.Print("3. Checking ADB Keyboard... ")
+		logs.Info("3. Checking ADB Keyboard... ")
 		cmd := exec.Command("adb", "shell", "ime", "list", "-s")
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			fmt.Println("❌ FAILED")
-			fmt.Println("   Error: ADB command timed out:", err)
-			allPassed = false
+			logs.Error("❌ FAILED")
+			logs.Infof("   Error: ADB command timed out: %v", err)
+			return false
 		}
 
 		imeList := string(output)
 		if strings.Contains(imeList, "com.android.adbkeyboard/.AdbIME") {
-			fmt.Println("✅ OK")
+			logs.Info("✅ OK")
 		} else {
-			fmt.Println("❌ FAILED")
-			fmt.Println("   Error: ADB Keyboard is not installed on the device.")
-			fmt.Println("   Solution:")
-			fmt.Println("     1. Download ADB Keyboard APK from:")
-			fmt.Println("        https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk")
-			fmt.Println("     2. Install it on your device: adb install ADBKeyboard.apk")
-			fmt.Println("     3. Enable it in Settings > System > Languages & Input > Virtual Keyboard")
-			allPassed = false
+			logs.Error("❌ FAILED")
+			logs.Infof("   Error: ADB Keyboard is not installed on the device.")
+			logs.Infof("   Solution:")
+			logs.Infof("     1. Download ADB Keyboard APK from:")
+			logs.Infof("        https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk")
+			logs.Infof("     2. Install it on your device: adb install ADBKeyboard.apk")
+			logs.Infof("     3. Enable it in Settings > System > Languages & Input > Virtual Keyboard")
+			return false
 		}
 
 	} else { // IOS
 		// todo
-		// // Check WebDriverAgent
-		// fmt.Printf("3. Checking WebDriverAgent (%s)... ", wdaURL)
-		// conn := NewXCTestConnection(wdaURL)
-		// if conn.IsWDAResponsive() {
-		// 	fmt.Println("✅ OK")
-		// 	// Get WDA status for additional info
-		// 	status, err := conn.GetWDAStatus()
-		// 	if err == nil && status != nil {
-		// 		sessionID, ok := status["sessionId"]
-		// 		if ok {
-		// 			fmt.Printf("   Session ID: %v\n", sessionID)
-		// 		}
-		// 	}
-		// } else {
-		// 	fmt.Println("❌ FAILED")
-		// 	fmt.Println("   Error: WebDriverAgent is not running or not accessible.")
-		// 	fmt.Println("   Solution:")
-		// 	fmt.Println("     1. Run WebDriverAgent on your iOS device via Xcode")
-		// 	fmt.Println("     2. For USB: Set up port forwarding: iproxy 8100 8100")
-		// 	fmt.Println("     3. For WiFi: Use device IP, e.g., --wda-url http://192.168.1.100:8100")
-		// 	fmt.Println("     4. Verify in browser: open http://localhost:8100/status")
-		// 	allPassed = false
-		// }
 	}
 
-	fmt.Println(strings.Repeat("-", 50))
+	logs.Info(strings.Repeat("-", 50))
+	logs.Info("✅ All system checks passed!")
 
-	if allPassed {
-		fmt.Println("✅ All system checks passed!")
-	} else {
-		fmt.Println("❌ System check failed. Please fix the issues above.")
-	}
-
-	return allPassed
+	return true
 }
 
 // printConfiguration prints the configuration information
@@ -644,70 +614,65 @@ func printConfiguration(ctx context.Context, phoneAgent *phoneagent.PhoneAgent) 
 	agentConfig := phoneAgent.AgentConfig
 	device := phoneAgent.Device
 
-	fmt.Println(strings.Repeat("=", 50))
+	logs.Info(strings.Repeat("=", 50))
 	if config.DeviceType == constants.ADB {
-		fmt.Println("Phone Agent - AI-powered phone automation")
+		logs.Info("Phone Agent - AI-powered phone automation")
 	} else {
-		fmt.Println("Phone Agent iOS - AI-powered iOS automation")
+		logs.Info("Phone Agent iOS - AI-powered iOS automation")
 	}
 
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Printf("Model: %s\n", modelConfig.ModelName)
-	fmt.Printf("Base URL: %s\n", modelConfig.BaseURL)
-	fmt.Printf("Max Steps: %d\n", agentConfig.MaxSteps)
-	fmt.Printf("Language: %s\n", agentConfig.Lang)
-	fmt.Printf("Device Type: %s\n", strings.ToUpper(config.DeviceType))
-
-	// Show iOS-specific config
-	if config.DeviceType == constants.IOS {
-		fmt.Printf("WDA URL: %s\n", config.WdaUrl)
+	logs.Info(strings.Repeat("=", 50))
+	logs.Infof("Model: %s", modelConfig.ModelName)
+	logs.Infof("Base URL: %s", modelConfig.BaseURL)
+	logs.Infof("Max Steps: %d", agentConfig.MaxSteps)
+	logs.Infof("Language: %s", agentConfig.Lang)
+	logs.Infof("Device Type: %s", strings.ToUpper(config.DeviceType))
+	if agentConfig.DeviceID != "" {
+		logs.Infof("Device: %s", agentConfig.DeviceID)
 	}
 
 	devices, err := device.ListDevices(ctx)
 	if err != nil {
-		fmt.Println("❌ Failed to list devices:", err)
+		logs.Errorf("❌ Failed to list devices, err: %v", err)
 		return
 	}
 
 	// Show device info
-	if config.DeviceType == constants.IOS {
-		if agentConfig.DeviceID != "" {
-			fmt.Printf("Device: %s\n", agentConfig.DeviceID)
-		} else if len(devices) > 0 {
-			device := devices[0]
-			deviceName := device.DeviceID
+	if len(devices) > 0 {
+		d := devices[0]
+		if config.DeviceType == constants.IOS {
+
+			deviceName := d.DeviceID
 			if len(deviceName) > 16 {
 				deviceName = deviceName[:16]
 			}
-			fmt.Printf("Device: %s\n", deviceName)
-			if device.Model != "" {
-				fmt.Printf("        %s\n", device.Model)
+			logs.Infof("Device: %s", deviceName)
+			if d.Model != "" {
+				logs.Infof("Model: %s", d.Model)
 			}
-		}
-	} else {
-		if agentConfig.DeviceID != "" {
-			fmt.Printf("Device: %s\n", agentConfig.DeviceID)
-		} else if len(devices) > 0 {
-			fmt.Printf("Device: %s (auto-detected)\n", devices[0].DeviceID)
+		} else {
+			logs.Infof("Device: %s (auto-detected)", d.DeviceID)
 		}
 	}
-	fmt.Println(strings.Repeat("=", 50))
+	logs.Info(strings.Repeat("=", 50))
 }
 
 func checkModelAPI(ctx context.Context, baseURL, modelName, apiKey string) bool {
-	fmt.Println("🔍 Checking model API...")
-	fmt.Println(strings.Repeat("-", 50))
-	allPassed := true
+	logs.Info("🔍 Checking model API...")
+	logs.Info(strings.Repeat("-", 50))
+
 	// Check 1: Network connectivity using chat API
-	fmt.Printf("1. Checking API connectivity (%s)... ", baseURL)
+	logs.Infof("1. Checking API connectivity (%s)... ", baseURL)
 
 	// Create OpenAI client
 	config := openai.DefaultConfig(apiKey)
 	config.BaseURL = baseURL
 	client := openai.NewClientWithConfig(config)
+
 	// Set timeout context
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	// Use chat completion to test connectivity
 	resp, err := client.CreateChatCompletion(
 		ctx,
@@ -726,42 +691,42 @@ func checkModelAPI(ctx context.Context, baseURL, modelName, apiKey string) bool 
 	)
 	// Check response
 	if err != nil {
-		fmt.Println("❌ FAILED")
+		logs.Error("❌ FAILED")
 		errorMsg := err.Error()
 		// Provide more specific error messages
 		switch {
 		case strings.Contains(errorMsg, "connection refused") || strings.Contains(errorMsg, "connection error"):
-			fmt.Printf("   Error: Cannot connect to %s\n", baseURL)
-			fmt.Println("   Solution:")
-			fmt.Println("     1. Check if the model server is running")
-			fmt.Println("     2. Verify the base URL is correct")
-			fmt.Printf("     3. Try: curl %s/chat/completions\n", baseURL)
+			logs.Infof("   Error: Cannot connect to %s", baseURL)
+			logs.Info("   Solution:")
+			logs.Info("     1. Check if the model server is running")
+			logs.Info("     2. Verify the base URL is correct")
+			logs.Infof("     3. Try: curl %s/chat/completions", baseURL)
 		case strings.Contains(strings.ToLower(errorMsg), "timed out") || strings.Contains(errorMsg, "timeout"):
-			fmt.Printf("   Error: Connection to %s timed out\n", baseURL)
-			fmt.Println("   Solution:")
-			fmt.Println("     1. Check your network connection")
-			fmt.Println("     2. Verify the server is responding")
+			logs.Infof("   Error: Connection to %s timed out", baseURL)
+			logs.Info("   Solution:")
+			logs.Info("     1. Check your network connection")
+			logs.Info("     2. Verify the server is responding")
 		case strings.Contains(errorMsg, "no such host") || strings.Contains(errorMsg, "name resolution"):
-			fmt.Println("   Error: Cannot resolve hostname")
-			fmt.Println("   Solution:")
-			fmt.Println("     1. Check the URL is correct")
-			fmt.Println("     2. Verify DNS settings")
+			logs.Info("   Error: Cannot resolve hostname")
+			logs.Info("   Solution:")
+			logs.Info("     1. Check the URL is correct")
+			logs.Info("     2. Verify DNS settings")
 		default:
-			fmt.Printf("   Error: %s\n", errorMsg)
+			logs.Infof("   Error: %s", errorMsg)
 		}
-		allPassed = false
-	} else if len(resp.Choices) == 0 {
-		fmt.Println("❌ FAILED")
-		fmt.Println("   Error: Received empty response from API")
-		allPassed = false
-	} else {
-		fmt.Printf("✅ OK, Response: %s\n", utils.JsonString(resp))
+		return false
 	}
-	fmt.Println(strings.Repeat("-", 50))
-	if allPassed {
-		fmt.Println("✅ Model API checks passed!")
-	} else {
-		fmt.Println("❌ Model API check failed. Please fix the issues above.")
+
+	if len(resp.Choices) == 0 {
+		logs.Error("❌ FAILED")
+		logs.Error("   Error: Received empty response from API")
+		return false
 	}
-	return allPassed
+
+	logs.Infof("✅ OK, Response: %s", utils.JsonString(resp))
+
+	logs.Info(strings.Repeat("-", 50))
+	logs.Info("✅ Model API checks passed!")
+
+	return true
 }

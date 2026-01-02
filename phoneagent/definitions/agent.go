@@ -1,16 +1,16 @@
 package definitions
 
 import (
-	"autoglm-go/constants"
 	"fmt"
 	"time"
+
+	"autoglm-go/constants"
 )
 
 type AgentConfig struct {
 	MaxSteps int
 	DeviceID string
 	Lang     string
-	Verbose  bool
 	WdaUrl   string // ios only
 }
 

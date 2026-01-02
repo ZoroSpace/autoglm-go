@@ -1,10 +1,12 @@
 package helper
 
 import (
+	"fmt"
+
 	"autoglm-go/constants"
 	"autoglm-go/utils"
-	"fmt"
 	"github.com/sashabaranov/go-openai"
+	logs "github.com/sirupsen/logrus"
 )
 
 func CreateSystemMessage(content string) openai.ChatCompletionMessage {
@@ -32,7 +34,7 @@ func CreateUserMessage(text string, imageBase64 *string) openai.ChatCompletionMe
 		},
 	}
 	// 如果有图片，加入 MultiContent
-	if imageBase64 != nil {
+	if imageBase64 != nil && *imageBase64 != "" {
 		msg.MultiContent = append(msg.MultiContent, openai.ChatMessagePart{
 			Type: openai.ChatMessagePartTypeImageURL,
 			ImageURL: &openai.ChatMessageImageURL{
@@ -41,6 +43,25 @@ func CreateUserMessage(text string, imageBase64 *string) openai.ChatCompletionMe
 		})
 	}
 	return msg
+}
+
+func PrintChatMessage(msg *openai.ChatCompletionMessage) {
+	// 不打印 system prompt
+	if msg.Role == openai.ChatMessageRoleSystem {
+		return
+	}
+	// user 只打印 text
+	if msg.Role == openai.ChatMessageRoleUser {
+		for _, part := range msg.MultiContent {
+			if part.Type == openai.ChatMessagePartTypeText {
+				logs.Debugf("👤 user message: %s", part.Text)
+			}
+		}
+	}
+	// assistant 打印 content
+	if msg.Role == openai.ChatMessageRoleAssistant {
+		logs.Debugf("🌐 assistant message: %s", msg.Content)
+	}
 }
 
 func BuildScreenInfo(currentApp string) string {

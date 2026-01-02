@@ -20,11 +20,13 @@ AutoGLM-Go 是 Open-AutoGLM 项目的 Go 语言重写版本，专注于 Android 
 - 🛠️ 丰富的命令行工具
 
 ## 系统要求
-
 - Go 1.23 或更高版本
 - Android SDK Platform Tools (ADB)
 - Android 设备或模拟器（已启用开发者选项和 USB 调试）
-- OpenAI 兼容的 API 服务
+
+## 环境准备
+- 见 [原项目](https://github.com/zai-org/Open-AutoGLM) **Android 环境准备**
+- 在 [智谱大模型平台](https://bigmodel.cn) 注册账号并获取 API 密钥
 
 ## 安装步骤
 
@@ -35,73 +37,43 @@ git clone https://github.com/ZoroSpace/autoglm-go.git
 cd autoglm-go
 ```
 
-### 2. 安装依赖
-
-```bash
-go mod download
-```
-
-### 3. 编译项目
+### 2. 编译项目
 
 ```bash
 go build -o autoglm-go main.go
 ```
-
-### 4. 设置 Android 设备
-
-1. 在 Android 设备上启用"开发者选项"
-2. 在"开发者选项"中启用"USB 调试"
-3. 通过 USB 连接设备到计算机，或设置网络 ADB 连接
-
-### 5. 验证 ADB 连接
-
-```bash
-adb devices
-```
-
-您应该能看到已连接的设备列表。
 
 ## 使用方法
 
 ### 基本用法
 
 ```bash
-# 使用默认设置运行
-./autoglm-go "打开微信并发送消息给张三"
+# 指定任务
+./autoglm-go --apikey xxxxx "打开抖音并搜索美食视频"
 
-# 指定模型 API
-./autoglm-go --base-url http://localhost:8000/v1 --model autoglm-phone "打开设置并调整音量"
-
-# 使用 API 密钥
-./autoglm-go --apikey sk-xxxxx "打开抖音并搜索美食视频"
-
-# 指定设备 ID
-./autoglm-go --device-id emulator-5554 "打开淘宝搜索手机"
+# 交互模式
+./autoglm-go --apikey xxxxx
 ```
 
 ### 设备管理
 
 ```bash
-# 列出已连接的设备
+# 查看当前已连接的设备列表
 ./autoglm-go --list-devices
 
-# 连接到远程设备
+# 连接指定IP地址的远程设备
 ./autoglm-go --connect 192.168.1.100:5555
 
-# 断开远程设备连接
+# 断开与指定设备的连接
 ./autoglm-go --disconnect 192.168.1.100:5555
-
-# 启用设备的 TCP/IP 调试模式
-./autoglm-go --enable-tcpip 5555
-
-# 获取设备 IP 地址
-./autoglm-go --get-device-ip
 ```
+更多设备管理命令请参考 main.go 源文件中的实现。
+
 
 ### 应用程序支持
 
 ```bash
-# 列出支持的应用程序
+# 获取当前支持的应用程序列表
 ./autoglm-go --list-apps
 ```
 
@@ -109,7 +81,7 @@ adb devices
 
 | 选项 | 环境变量 | 默认值 | 描述 |
 |------|----------|--------|------|
-| `--base-url` | `PHONE_AGENT_BASE_URL` | `http://localhost:8000/v1` | 模型 API 基础 URL |
+| `--base-url` | `PHONE_AGENT_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | 模型 API 基础 URL |
 | `--model` | `PHONE_AGENT_MODEL` | `autoglm-phone` | 模型名称 |
 | `--apikey` | `PHONE_AGENT_API_KEY` | `EMPTY` | API 密钥 |
 | `--max-steps` | `PHONE_AGENT_MAX_STEPS` | `100` | 每个任务的最大步数 |
@@ -140,16 +112,16 @@ adb devices
 
 ```bash
 # 社交应用操作
-./autoglm-go "打开微信，给张三发消息说我今天晚点到"
+./autoglm-go --apikey xxxxx "打开微信，给张三发消息说我今天晚点到"
 
 # 购物应用操作
-./autoglm-go "打开淘宝搜索iPhone 15并加入购物车"
+./autoglm-go --apikey xxxxx "打开淘宝搜索iPhone 15并加入购物车"
 
 # 视频应用操作
-./autoglm-go "打开抖音搜索美食视频并点赞前三个"
+./autoglm-go --apikey xxxxx "打开抖音搜索美食视频并点赞前三个"
 
 # 系统设置操作
-./autoglm-go "打开设置将屏幕亮度调整到50%"
+./autoglm-go --apikey xxxxx "打开设置将屏幕亮度调整到50%"
 ```
 
 ## 开发
@@ -178,5 +150,3 @@ autoglm-go/
 ## 致谢
 
 - [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) - 原始项目
-- [go-openai](https://github.com/sashabaranov/go-openai) - OpenAI Go 客户端
-- [cobra](https://github.com/spf13/cobra) - Go CLI 框架

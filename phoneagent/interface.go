@@ -1,12 +1,13 @@
 package phoneagent
 
 import (
+	"context"
+	"fmt"
+
 	"autoglm-go/constants"
 	"autoglm-go/phoneagent/android"
 	"autoglm-go/phoneagent/definitions"
 	"autoglm-go/phoneagent/ios"
-	"context"
-	"fmt"
 )
 
 // DeviceOperator 定义设备操作接口
