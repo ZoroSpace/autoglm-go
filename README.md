@@ -1,7 +1,7 @@
 # AutoGLM-Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.23+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 AutoGLM-Go 是 Open-AutoGLM 项目的 Go 语言重写版本，专注于 Android 设备的自动化操作。本项目使用 AI 模型来理解和执行手机操作任务，通过 ADB (Android Debug Bridge) 与 Android 设备进行交互。
 
